@@ -1,11 +1,11 @@
 use jack;
 
-const MAX_AMPLITUDE: f32 = 0.2;
+const MAX_AMPLITUDE: f32 = 0.5;
 
 const ATTACK: usize = 2000;
-const DECAY: usize = 5000;
+const DECAY: usize = 2000;
 const SUSTAIN: f32 = 0.6;
-const RELEASE: usize = 10000;
+const RELEASE: usize = 5000;
 
 fn main() {
     let (client, _status) = jack::Client::new("rust_client", jack::ClientOptions::NO_START_SERVER).unwrap();
@@ -29,8 +29,6 @@ fn main() {
                 *value = synthesizer.get_audio_data(frame as usize);
             }
 
-            synthesizer.notes_gc();
-
             jack::Control::Continue
         }
     );
@@ -39,71 +37,83 @@ fn main() {
     loop {}
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum EnvelopePhase {
-    Stage(usize),
-    Attack(usize),
-    Decay(usize),
-    Sustain,
+    Attack(usize, f32, f32),
+    Decay(usize, f32, f32),
+    Sustain(f32),
     Release(usize, f32),
     Off,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Note {
-    pitch: u8,
+    frequency: f32,
     velocity: u8,
     time: usize,
     env_phase: EnvelopePhase,
+    next_start_frame: Option<usize>,
 }
 
 impl Note {
-    fn new(pitch: u8, velocity: u8, start_time: usize) -> Note {
+    fn new(frequency: f32) -> Note {
         Note {
-            pitch,
-            velocity,
+            frequency,
+            velocity: 0,
             time: 0,
-            env_phase: EnvelopePhase::Stage(start_time),
+            env_phase: EnvelopePhase::Off,
+            next_start_frame: None,
         }
     }
 
-    fn increment_time(&mut self, time: usize) {
+    fn increment_time(&mut self, frame: usize) {
         self.time += 1;
 
-        if let EnvelopePhase::Stage(start_time) = self.env_phase {
-            if start_time == time {
-                self.env_phase = EnvelopePhase::Attack(0);
-            }
-        } else if let EnvelopePhase::Attack(phase_timer) = self.env_phase {
-            if phase_timer == ATTACK {
-                self.env_phase = EnvelopePhase::Decay(0);
-            } else {
-                self.env_phase = EnvelopePhase::Attack(phase_timer + 1);
-            }
-        } else if let EnvelopePhase::Decay(phase_timer) = self.env_phase {
-            if phase_timer == DECAY {
-                self.env_phase = EnvelopePhase::Sustain;
-            } else {
-                self.env_phase = EnvelopePhase::Decay(phase_timer + 1);
-            }
-        } else if let EnvelopePhase::Release(phase_timer, released_amplitude) = self.env_phase {
-            if phase_timer >= RELEASE {
-                self.env_phase = EnvelopePhase::Off;
-            } else {
-                self.env_phase = EnvelopePhase::Release(phase_timer + 1, released_amplitude);
+        if let Some(start_frame) = self.next_start_frame {
+            if start_frame == frame {
+                self.next_start_frame = None;
+                self.env_phase = EnvelopePhase::Attack(0, self.amplitude(), self.fractional_velocity());
             }
         }
+
+        match self.env_phase {
+            EnvelopePhase::Attack(phase_timer, amplitude_start, amplitude_end) => {
+                if phase_timer == ATTACK {
+                    self.env_phase = EnvelopePhase::Decay(0, self.fractional_velocity(), self.fractional_velocity() * SUSTAIN);
+                } else {
+                    self.env_phase = EnvelopePhase::Attack(phase_timer + 1, amplitude_start, amplitude_end);
+                }
+            },
+            EnvelopePhase::Decay(phase_timer, amplitude_start, amplitude_end) => {
+                if phase_timer == DECAY {
+                    self.env_phase = EnvelopePhase::Sustain(self.fractional_velocity() * SUSTAIN);
+                } else {
+                    self.env_phase = EnvelopePhase::Decay(phase_timer + 1, amplitude_start, amplitude_end);
+                }
+            },
+            EnvelopePhase::Release(phase_timer, amplitude_start) => {
+                if phase_timer == RELEASE {
+                    self.env_phase = EnvelopePhase::Off;
+                } else {
+                    self.env_phase = EnvelopePhase::Release(phase_timer + 1, amplitude_start);
+                }
+            },
+            _ => (),
+        };
     }
 
     fn amplitude(&self) -> f32 {
         match self.env_phase {
-            EnvelopePhase::Stage(_) => 0.0,
-            EnvelopePhase::Attack(phase_timer) => phase_timer as f32 / ATTACK as f32,
-            EnvelopePhase::Decay(phase_timer) => 1.0 - ((1.0 - SUSTAIN) * phase_timer as f32 / DECAY as f32),
-            EnvelopePhase::Sustain => SUSTAIN,
-            EnvelopePhase::Release(phase_timer, released_amplitude) => released_amplitude - (released_amplitude * phase_timer as f32 / RELEASE as f32),
+            EnvelopePhase::Attack(phase_timer, amplitude_start, amplitude_end) => amplitude_start + (amplitude_end - amplitude_start) * phase_timer as f32 / ATTACK as f32,
+            EnvelopePhase::Decay(phase_timer, amplitude_start, amplitude_end) => amplitude_start - (amplitude_start - amplitude_end) * phase_timer as f32 / DECAY as f32,
+            EnvelopePhase::Sustain(amplitude) => amplitude,
+            EnvelopePhase::Release(phase_timer, amplitude_start) => amplitude_start - amplitude_start * phase_timer as f32 / RELEASE as f32,
             EnvelopePhase::Off => 0.0,
         }
+    }
+
+    fn fractional_velocity(&self) -> f32 {
+        self.velocity as f32 / 127.0
     }
 
     fn release(&mut self) {
@@ -113,19 +123,21 @@ impl Note {
 
 struct Synthesizer {
     time_step: f32,
-    notes: Vec<Note>,
-    frequencies: [f32; 128],
+    notes: [Note; 128],
 }
 
 impl Synthesizer {
     fn new(sample_rate: usize, frequencies: [f32; 128]) -> Synthesizer {
         let time_step = 1.0 / sample_rate as f32;
-        let notes = Vec::new();
+        let mut notes = [Note::new(0.0); 128];
+
+        for i in 0..128 {
+            notes[i].frequency = frequencies[i];
+        }
 
         Synthesizer {
             time_step,
             notes,
-            frequencies,
         }
     }
 
@@ -143,34 +155,29 @@ impl Synthesizer {
     }
 
     fn note_on(&mut self, pitch: u8, velocity: u8, start_time: usize) {
-        self.notes.push(Note::new(pitch, velocity, start_time));
+        let pitch = pitch as usize;
+        self.notes[pitch].velocity = velocity;
+        self.notes[pitch].next_start_frame = Some(start_time);
     }
 
     fn note_off(&mut self, pitch: u8) {
-        for note in self.notes.iter_mut() {
-            if note.pitch == pitch {
-                note.release();
-            }
-        }
+        let pitch = pitch as usize;
+        self.notes[pitch].release();
     }
 
     fn get_audio_data(&mut self, frame: usize) -> f32 {
         let mut value = 0.0;
         for note in self.notes.iter_mut() {
-            let x: f32 = self.frequencies[note.pitch as usize] * self.time_step * note.time as f32 * 2.0 * std::f32::consts::PI;
-            let y = MAX_AMPLITUDE * note.amplitude() * note.velocity as f32 / 127.0 * x.sin();
+            if note.env_phase == EnvelopePhase::Off && note.next_start_frame.is_none() {
+                continue;
+            }
+
+            let x: f32 = note.frequency * self.time_step * note.time as f32 * 2.0 * std::f32::consts::PI;
+            let y = MAX_AMPLITUDE * note.amplitude() * x.sin();
             value += y;
 
             note.increment_time(frame);
         }
         value
-    }
-
-    fn notes_gc(&mut self) {
-        for i in (0..self.notes.len()).rev() {
-            if self.notes[i].env_phase == EnvelopePhase::Off {
-                self.notes.swap_remove(i);
-            }
-        }
     }
 }
