@@ -38,7 +38,7 @@ fn main() {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum EnvelopePhase {
+enum EnvelopeStage {
     Attack(usize, f32, f32),
     Decay(usize, f32, f32),
     Sustain(f32),
@@ -51,7 +51,7 @@ struct Note {
     frequency: f32,
     velocity: u8,
     time: usize,
-    env_phase: EnvelopePhase,
+    envelope_stage: EnvelopeStage,
     next_start_frame: Option<usize>,
 }
 
@@ -61,7 +61,7 @@ impl Note {
             frequency,
             velocity: 0,
             time: 0,
-            env_phase: EnvelopePhase::Off,
+            envelope_stage: EnvelopeStage::Off,
             next_start_frame: None,
         }
     }
@@ -72,30 +72,30 @@ impl Note {
         if let Some(start_frame) = self.next_start_frame {
             if start_frame == frame {
                 self.next_start_frame = None;
-                self.env_phase = EnvelopePhase::Attack(0, self.amplitude(), self.fractional_velocity());
+                self.envelope_stage = EnvelopeStage::Attack(0, self.amplitude(), self.fractional_velocity());
             }
         }
 
-        match self.env_phase {
-            EnvelopePhase::Attack(phase_timer, amplitude_start, amplitude_end) => {
+        match self.envelope_stage {
+            EnvelopeStage::Attack(phase_timer, amplitude_start, amplitude_end) => {
                 if phase_timer == ATTACK {
-                    self.env_phase = EnvelopePhase::Decay(0, self.fractional_velocity(), self.fractional_velocity() * SUSTAIN);
+                    self.envelope_stage = EnvelopeStage::Decay(0, self.fractional_velocity(), self.fractional_velocity() * SUSTAIN);
                 } else {
-                    self.env_phase = EnvelopePhase::Attack(phase_timer + 1, amplitude_start, amplitude_end);
+                    self.envelope_stage = EnvelopeStage::Attack(phase_timer + 1, amplitude_start, amplitude_end);
                 }
             },
-            EnvelopePhase::Decay(phase_timer, amplitude_start, amplitude_end) => {
+            EnvelopeStage::Decay(phase_timer, amplitude_start, amplitude_end) => {
                 if phase_timer == DECAY {
-                    self.env_phase = EnvelopePhase::Sustain(self.fractional_velocity() * SUSTAIN);
+                    self.envelope_stage = EnvelopeStage::Sustain(self.fractional_velocity() * SUSTAIN);
                 } else {
-                    self.env_phase = EnvelopePhase::Decay(phase_timer + 1, amplitude_start, amplitude_end);
+                    self.envelope_stage = EnvelopeStage::Decay(phase_timer + 1, amplitude_start, amplitude_end);
                 }
             },
-            EnvelopePhase::Release(phase_timer, amplitude_start) => {
+            EnvelopeStage::Release(phase_timer, amplitude_start) => {
                 if phase_timer == RELEASE {
-                    self.env_phase = EnvelopePhase::Off;
+                    self.envelope_stage = EnvelopeStage::Off;
                 } else {
-                    self.env_phase = EnvelopePhase::Release(phase_timer + 1, amplitude_start);
+                    self.envelope_stage = EnvelopeStage::Release(phase_timer + 1, amplitude_start);
                 }
             },
             _ => (),
@@ -103,12 +103,12 @@ impl Note {
     }
 
     fn amplitude(&self) -> f32 {
-        match self.env_phase {
-            EnvelopePhase::Attack(phase_timer, amplitude_start, amplitude_end) => amplitude_start + (amplitude_end - amplitude_start) * phase_timer as f32 / ATTACK as f32,
-            EnvelopePhase::Decay(phase_timer, amplitude_start, amplitude_end) => amplitude_start - (amplitude_start - amplitude_end) * phase_timer as f32 / DECAY as f32,
-            EnvelopePhase::Sustain(amplitude) => amplitude,
-            EnvelopePhase::Release(phase_timer, amplitude_start) => amplitude_start - amplitude_start * phase_timer as f32 / RELEASE as f32,
-            EnvelopePhase::Off => 0.0,
+        match self.envelope_stage {
+            EnvelopeStage::Attack(phase_timer, amplitude_start, amplitude_end) => amplitude_start + (amplitude_end - amplitude_start) * phase_timer as f32 / ATTACK as f32,
+            EnvelopeStage::Decay(phase_timer, amplitude_start, amplitude_end) => amplitude_start - (amplitude_start - amplitude_end) * phase_timer as f32 / DECAY as f32,
+            EnvelopeStage::Sustain(amplitude) => amplitude,
+            EnvelopeStage::Release(phase_timer, amplitude_start) => amplitude_start - amplitude_start * phase_timer as f32 / RELEASE as f32,
+            EnvelopeStage::Off => 0.0,
         }
     }
 
@@ -117,7 +117,7 @@ impl Note {
     }
 
     fn release(&mut self) {
-        self.env_phase = EnvelopePhase::Release(0, self.amplitude());
+        self.envelope_stage = EnvelopeStage::Release(0, self.amplitude());
     }
 }
 
@@ -150,7 +150,7 @@ impl Synthesizer {
         match status >> 4 {
             0b1000 => self.note_off(pitch),
             0b1001 => self.note_on(pitch, velocity, start_time),
-            _ => return,
+            _ => (),
         };
     }
 
@@ -168,7 +168,7 @@ impl Synthesizer {
     fn get_audio_data(&mut self, frame: usize) -> f32 {
         let mut value = 0.0;
         for note in self.notes.iter_mut() {
-            if note.env_phase == EnvelopePhase::Off && note.next_start_frame.is_none() {
+            if note.envelope_stage == EnvelopeStage::Off && note.next_start_frame.is_none() {
                 continue;
             }
 
