@@ -46,6 +46,11 @@ enum EnvelopeStage {
     Off,
 }
 
+enum Waveform {
+    Sine,
+    Square,
+}
+
 #[derive(Copy, Clone, Debug)]
 struct Note {
     frequency: f32,
@@ -172,12 +177,21 @@ impl Synthesizer {
                 continue;
             }
 
-            let x: f32 = note.frequency * self.time_step * note.time as f32 * 2.0 * std::f32::consts::PI;
-            let y = MAX_AMPLITUDE * note.amplitude() * x.sin();
-            value += y;
+            value += wave_value(Waveform::Square, note.frequency, note.amplitude(), note.time as f32 * self.time_step);
 
             note.increment_time(frame);
         }
         value
     }
+}
+
+fn wave_value(waveform: Waveform, frequency: f32, amplitude: f32, time: f32) -> f32 {
+    let arg = 2.0 * std::f32::consts::PI * frequency * time;
+
+    let value = match waveform {
+        Waveform::Sine => arg.sin(),
+        Waveform::Square => arg.sin().signum(),
+    };
+
+    MAX_AMPLITUDE * amplitude * value
 }
